@@ -123,7 +123,7 @@ Per the course requirements, the project includes:
 
 ## Author
 
-Developed by \[Your Name].
+Developed by Daniil Shcharbakou.
 
 ## License
 
