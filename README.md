@@ -30,29 +30,6 @@ Key features:
 * Maven 3.6+
 * MySQL Server 8.x
 
-## Project Structure
-
-
-search-engine/
-├── pom.xml
-├── README.md
-├── src/
-│   ├── main/
-│   │   ├── java/com/skillbox/searchengine/
-│   │   │   ├── Application.java
-│   │   │   ├── config/
-│   │   │   ├── controller/
-│   │   │   ├── dto/
-│   │   │   ├── model/
-│   │   │   ├── repository/
-│   │   │   ├── service/
-│   │   │   └── util/
-│   │   └── resources/
-│   │       ├── application.yaml
-│   │       └── templates/
-├── static/ (optional front-end assets)
-└── test/
-
 
 ## Configuration
 
