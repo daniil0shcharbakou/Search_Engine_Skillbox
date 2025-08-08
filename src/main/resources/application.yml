@@ -6,11 +6,10 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
-    show-sql: true
-app:
+    show-sql: false
+indexing-settings:
   sites:
-    - url: "https://example.com"
-      name: "example"
-    - url: "https://example.org"
-      name: "example-org"
-  user-agent: "SearchEngineBot/1.0"
+    - url: https://www.lenta.ru
+      name: Лента.ру
+    - url: https://www.skillbox.ru
+      name: Skillbox
