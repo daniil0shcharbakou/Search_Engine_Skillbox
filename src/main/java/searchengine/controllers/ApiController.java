@@ -20,8 +20,12 @@ public class ApiController {
 
     @GetMapping("/startIndexing")
     public ResponseEntity<SimpleResponse> startIndexing() {
-        // TODO: вызвать indexingService.startIndexing()
-        return ResponseEntity.ok(new SimpleResponse(true, null));
+        try {
+            indexingService.startIndexing();
+            return ResponseEntity.ok(new SimpleResponse(true, null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.ok(new SimpleResponse(false, e.getMessage()));
+        }
     }
 
     @GetMapping("/stopIndexing")
@@ -32,8 +36,12 @@ public class ApiController {
 
     @PostMapping("/indexPage")
     public ResponseEntity<SimpleResponse> indexPage(@RequestParam String url) {
-        indexingService.indexPage(url);
-        return ResponseEntity.ok(new SimpleResponse(true, null));
+        try {
+            indexingService.indexPage(url);
+            return ResponseEntity.ok(new SimpleResponse(true, null));
+        } catch (RuntimeException e) {
+            return ResponseEntity.ok(new SimpleResponse(false, e.getMessage()));
+        }
     }
 
     @GetMapping("/statistics")
@@ -50,3 +58,4 @@ public class ApiController {
         return ResponseEntity.ok(searchService.search(query, site, offset, limit));
     }
 }
+

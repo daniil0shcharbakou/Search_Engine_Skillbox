@@ -13,6 +13,7 @@ public class PageEntity {
     private Integer id;
 
     @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "site_id", nullable = false)
     private SiteEntity site;
 
     private String path;
