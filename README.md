@@ -1,130 +1,139 @@
-# Search_Engine_Skillbox
+# Поисковый движок (Search Engine) — итоговый проект курса «Java-разработчик»
 
-A simple web search engine built with Java, Spring Boot, JPA, MySQL, Jsoup, and Lucene Morphology.
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](#)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Project Overview
+---
 
-This project crawls configured websites, parses page content, extracts and indexes Russian lemmas, and provides a REST API for searching and retrieving statistics on the indexed data.
+# Оглавление
 
-Key features:
+* [Коротко о функционале](#коротко-о-функционале)
+* [Ключевые возможности](#ключевые-возможности)
+* [Требования](#требования)
+* [Быстрый старт (3 шага)](#быстрый-старт-3-шага)
 
-* Multithreaded site crawling with Jsoup
-* HTML cleanup and Russian lemmatization (Lucene Morphology)
-* Relational storage (MySQL) via Spring Data JPA
-* REST API for indexing control, full-text search, and statistics
-* Simple Thymeleaf-based frontend
+  * [1. Подготовка MySQL](#1-подготовка-mysql)
+  * [2. Настройка application.yml](#2-настройка-applicationyml)
+  * [3. Сборка и запуск](#3-сборка-и-запуск)
+* [Как это работает](#как-работает-коротко)
+* [Чек-лист соответствия ТЗ (для защиты)](#чек-лист-соответствия-тз-для-защиты)
+* [Лицензия](#лицензия)
+* [Контакты / Автор](#контакты--автор)
 
-## Technologies Used
+---
 
-* Java 17
-* Spring Boot 3.1
-* Spring Data JPA
-* MySQL 8
-* Jsoup 1.15.3
-* Apache Lucene Morphology 7.7.3
-* Thymeleaf
+# Коротко о функционале
 
-## Prerequisites
+Проект индексирует сайты и предоставляет поиск по ним. Результаты возвращают `title`, `uri`, `snippet` (plain text, без HTML) и `relevance` (оценка TF-IDF). Веб-часть реализована на Spring (Thymeleaf) — Dashboard, Management, Search. БД — MySQL, JPA/Hibernate.
 
-* Java 17+ installed
+---
+
+# Ключевые возможности
+
+* Многопоточная индексация (обход внутренних ссылок с Jsoup).
+* Лемматизация (MorphologyService).
+* Индекс в MySQL: таблицы `site`, `page`, `lemma`, `search_index`.
+* Поиск с TF-IDF ранжированием.
+* Генерация сниппетов без HTML, содержащих контекст слов запроса.
+* REST API: statistics, start/stop indexing, index single page, search.
+* Обновление страницы (indexPage) — не создаёт дубликатов, пересоздаёт индексы.
+
+---
+
+# Требования
+
+* Java 17+
 * Maven 3.6+
-* MySQL Server 8.x
+* MySQL 8.0 
+* Рекомендуется: IntelliJ IDEA
 
+---
 
-## Configuration
+# Полная инструкция по установке и запуску
 
-Edit `src/main/resources/application.yaml` to set database credentials, connection URL, and sites to crawl:
+## 1. Подготовка MySQL
 
-yaml
+Войдите в MySQL и выполните:
+
+```sql
+CREATE DATABASE search_engine CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- (опционально) создать отдельного пользователя:
+CREATE USER 'search_user'@'localhost' IDENTIFIED BY 'StrongPassword!';
+GRANT ALL PRIVILEGES ON search_engine.* TO 'search_user'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+**Важно про кодировку**: в JDBC URL обязательно добавьте `useUnicode=true&characterEncoding=utf8mb4`, чтобы корректно хранить русский текст.
+
+## 2. Настройка `application.yml`
+
+Скопируйте/отредактируйте `src/main/resources/application.yml`:
+
+```yaml
+server:
+  port: 8080
+
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/search_engine?useSSL=false&serverTimezone=UTC
+    url: jdbc:mysql://localhost:3306/search_engine?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC
     username: root
-    password: password
+    password: 12341k
   jpa:
     hibernate:
       ddl-auto: update
-    show-sql: true
-app:
-  sites:
-    - url: "https://example.com"
-      name: "example"
-    - url: "https://example.org"
-      name: "example-org"
-  user-agent: "SearchEngineBot/1.0"
+    show-sql: false
+```
 
+## 3. Сборка и запуск
 
-## Database Setup
+Собрать:
 
-1. Create the database:
+```bash
+mvn clean package -DskipTests
+```
 
-   sql
-   CREATE DATABASE search_engine CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-   
-2. (Optional) Create a dedicated user:
+Запустить:
 
-   sql
-   CREATE USER 'search_user'@'localhost' IDENTIFIED BY 's3cr3t';
-   GRANT ALL ON search_engine.* TO 'search_user'@'localhost';
-   
-3. Ensure credentials in `application.yaml` match.
+```bash
+java -jar target/search-engine-*.jar
+```
 
-With `spring.jpa.hibernate.ddl-auto=update`, tables are created automatically.
+Или запустите класс `searchengine.Application` из IDEA.
 
-## Running the Application
+---
 
-bash
-mvn clean package
-java -jar target/search-engine-1.0-SNAPSHOT.jar
+# Как это работает
 
+1. **Crawler** (Jsoup) скачивает HTML, извлекает текст и внутренние ссылки.
+2. **MorphologyService** лемматизирует текст (нормальная форма слов).
+3. **Indexing** — сохраняются `page`, `lemma`, `search_index` (lemma ↔ page с rank/tf).
+4. **Search** — по запросу собираются леммы, берутся TF по страницам и DF, вычисляется TF-IDF, результаты сортируются и возвращаются с сниппетом.
 
-Open `http://localhost:8080/` in your browser.
+---
 
-## REST API Endpoints
+# Чек-лист соответствия ТЗ (для защиты, обязательно проверить)
 
-* **GET** `/api/startIndexing` — Start crawling and indexing configured sites.
-* **GET** `/api/search?query={term}&offset={n}&limit={m}` — Full-text search. Returns JSON:
+* [x] Все три страницы UI открываются: Dashboard, Management, Search.
+* [x] Dashboard показывает статистику (sites, pages, lemmas) — соответствует БД.
+* [x] На Management работают Start/Stop индексации.
+* [x] Search работает по всем сайтам и по отдельному сайту.
+* [x] Результаты поиска содержат title и snippet без HTML.
+* [x] Сниппеты содержат слова запроса.
+* [x] `POST /api/indexPage` добавляет и обновляет страницу (без дублей).
+* [x] Результаты отсортированы по релевантности (TF-IDF реализован).
+* [x] README и LICENSE добавлены в репозиторий.
+* [ ] (Опционально) Проект доступен по публичному URL для демонстрации (если требуется — задеплоить).
 
-  json
-  {
-    "count": 3,
-    "results": [
-      {"uri":"https://...","title":"...","snippet":"...","relevance":5.0},
-      ...
-    ]
-  }
-  
-* **GET** `/api/statistics` — Retrieve indexing statistics. Returns JSON:
+---
 
-  json
-  {
-    "totalSites":2,
-    "totalPages":10,
-    "totalLemmas":1234,
-    "details":[{...},...]  
-  }
-  
-
-## Frontend
-
-A simple Thymeleaf page (`index.html`) provides a search form and button to load statistics (logged to console).
-
-## Evaluation Criteria
-
-Per the course requirements, the project includes:
-
-* Correct JPA entity design
-* Full-text indexing and search logic
-* Parallel crawling implementation
-* REST API coverage
-* Automatic schema generation
-* Clean code and project structure
-* Basic frontend interface
-
-## Author
-
-Developed by Daniil Shcharbakou.
-
-## License
+# Лицензия
 
 MIT License
+
+---
+
+# Автор
+
+Автор: Daniil Shcharbakou
+Email: dan.shcharbakou@gmail.com
