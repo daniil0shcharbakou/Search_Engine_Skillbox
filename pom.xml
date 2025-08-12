@@ -23,8 +23,13 @@
   <repositories>
     <repository>
       <id>apache-public</id>
-      <name>Apache Public Repository</name>
+      <name>CUBA BT Repository</name>
       <url>https://repository.apache.org/content/groups/public/</url>
+    </repository>
+    <repository>
+      <id>cuba-bt</id>
+      <name>Apache Public Repository</name>
+      <url>https://dl.bintray.com/cuba-platform/main/</url>
     </repository>
   </repositories>
 

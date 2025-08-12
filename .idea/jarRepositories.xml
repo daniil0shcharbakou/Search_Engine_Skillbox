@@ -17,6 +17,11 @@
       <option name="url" value="https://repository.apache.org/content/repositories/releases/" />
     </remote-repository>
     <remote-repository>
+      <option name="id" value="cuba-bt" />
+      <option name="name" value="Apache Public Repository" />
+      <option name="url" value="https://dl.bintray.com/cuba-platform/main/" />
+    </remote-repository>
+    <remote-repository>
       <option name="id" value="apache-public" />
       <option name="name" value="Apache Public Repository" />
       <option name="url" value="https://repository.apache.org/content/groups/public/" />
@@ -30,6 +35,11 @@
       <option name="id" value="jboss.community" />
       <option name="name" value="JBoss Community repository" />
       <option name="url" value="https://repository.jboss.org/nexus/content/repositories/public/" />
+    </remote-repository>
+    <remote-repository>
+      <option name="id" value="apache-public" />
+      <option name="name" value="Apache Public Repository" />
+      <option name="url" value="https://dl.bintray.com/cuba-platform/main/" />
     </remote-repository>
   </component>
 </project>

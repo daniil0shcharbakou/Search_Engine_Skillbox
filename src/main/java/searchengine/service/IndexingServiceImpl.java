@@ -123,31 +123,40 @@ public class IndexingServiceImpl implements IndexingService {
             log.debug("Индексация остановлена — пропускаю: {}", url);
             return;
         }
-
         String path = url.replaceFirst("^" + Pattern.quote(site.getUrl()), "");
-
-        if (pageRepository.existsBySiteAndPath(site, path)) {
-            log.debug("Страница уже проиндексирована, пропускаю: {}", url);
-            return;
-        }
-
         log.info("Crawling start: {}", url);
+
         try {
             Document doc = Jsoup.connect(url)
                     .userAgent("Mozilla/5.0 (compatible; SearchEngineBot/1.0)")
                     .timeout(10_000)
                     .get();
-
             String text = doc.body() != null ? doc.body().text() : "";
 
-            PageEntity page = new PageEntity();
-            page.setSite(site);
-            page.setPath(path);
-            page.setCode(200);
-            page.setContent(text);
-            page = pageRepository.save(page);
-            log.info("Saved page id={} site={} path={}", page.getId(), site.getUrl(), page.getPath());
+            // Найдём существующую страницу (если есть) — иначе создадим новую
+            Optional<PageEntity> existingOpt = pageRepository.findBySiteAndPath(site, path);
+            PageEntity page;
+            if (existingOpt.isPresent()) {
+                page = existingOpt.get();
+                page.setCode(200);
+                page.setContent(text);
+                page = pageRepository.save(page);
+                log.info("Updated page id={} site={} path={}", page.getId(), site.getUrl(), page.getPath());
 
+                // удалить прежние индексы для этой страницы, чтобы пересоздать актуальные
+                indexRepository.deleteByPage(page);
+                log.debug("Deleted old indices for page id={}", page.getId());
+            } else {
+                page = new PageEntity();
+                page.setSite(site);
+                page.setPath(path);
+                page.setCode(200);
+                page.setContent(text);
+                page = pageRepository.save(page);
+                log.info("Saved page id={} site={} path={}", page.getId(), site.getUrl(), page.getPath());
+            }
+
+            // Лемматизация и подсчёт частот
             List<String> lemmas = morphologyService.lemmatize(text);
             Map<String, Integer> freq = new HashMap<>();
             for (String lemma : lemmas) {
@@ -155,6 +164,7 @@ public class IndexingServiceImpl implements IndexingService {
             }
             log.info("Lemmas extracted for page id={} : tokens={} unique={}", page.getId(), lemmas.size(), freq.size());
 
+            // Сохраняем леммы и создаём индексные записи
             for (var entry : freq.entrySet()) {
                 String lemmaStr = entry.getKey();
                 int count = entry.getValue();
@@ -171,21 +181,19 @@ public class IndexingServiceImpl implements IndexingService {
 
                 lemmaEntity.setFrequency(lemmaEntity.getFrequency() + count);
                 lemmaEntity = lemmaRepository.save(lemmaEntity);
-                log.debug("Saved/updated lemma id={} lemma='{}' freq={}", lemmaEntity.getId(), lemmaEntity.getLemma(), lemmaEntity.getFrequency());
 
                 IndexEntity idx = new IndexEntity();
                 idx.setPage(page);
                 idx.setLemma(lemmaEntity);
                 idx.setRank(count);
                 indexRepository.save(idx);
-                log.debug("Saved index: pageId={} lemmaId={} rank={}", page.getId(), lemmaEntity.getId(), count);
             }
 
+            // Рекурсивный обход ссылок (по внутренним)
             Elements links = doc.select("a[href]");
-            for (var link : links) {
+            for (Element link : links) {
                 String absUrl = link.absUrl("href");
                 if (absUrl.startsWith(site.getUrl()) && running) {
-                    log.debug("Found link to crawl: {} (from {})", absUrl, url);
                     crawlAndIndex(absUrl, site);
                 }
             }

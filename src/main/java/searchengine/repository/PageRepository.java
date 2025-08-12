@@ -7,6 +7,7 @@ import searchengine.model.PageEntity;
 import searchengine.model.SiteEntity;
 
 import java.util.List;
+import java.util.Optional; // <- добавлено
 
 public interface PageRepository extends JpaRepository<PageEntity, Integer> {
     boolean existsBySiteAndPath(SiteEntity site, String path);
@@ -15,4 +16,6 @@ public interface PageRepository extends JpaRepository<PageEntity, Integer> {
 
     @Query("select p from PageEntity p join fetch p.site where p.id in :ids")
     List<PageEntity> findAllWithSiteByIdIn(@Param("ids") List<Integer> ids);
+
+    Optional<PageEntity> findBySiteAndPath(SiteEntity site, String path);
 }
