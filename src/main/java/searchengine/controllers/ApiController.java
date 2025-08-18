@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import searchengine.dto.SimpleResponse;
+import searchengine.dto.statistics.StatisticsApiResponse;
 import searchengine.dto.statistics.StatisticsResponse;
 import searchengine.dto.search.SearchResponse;
 import searchengine.service.IndexingService;
@@ -35,7 +36,7 @@ public class ApiController {
     }
 
     @PostMapping("/indexPage")
-    public ResponseEntity<SimpleResponse> indexPage(@RequestParam String url) {
+    public ResponseEntity<SimpleResponse> indexPage(@RequestParam("url") String url) {
         try {
             indexingService.indexPage(url);
             return ResponseEntity.ok(new SimpleResponse(true, null));
@@ -44,9 +45,17 @@ public class ApiController {
         }
     }
 
+    /**
+     * Важно: фронтенд ожидает структуру:
+     * { result: true, statistics: { total: {...}, detailed: [...] } }
+     */
     @GetMapping("/statistics")
-    public ResponseEntity<StatisticsResponse> statistics() {
-        return ResponseEntity.ok(statisticsService.getStatistics());
+    public ResponseEntity<StatisticsApiResponse> statistics() {
+        StatisticsResponse statistics = statisticsService.getStatistics();
+        StatisticsApiResponse wrapper = new StatisticsApiResponse();
+        wrapper.setResult(statistics.isResult());
+        wrapper.setStatistics(statistics);
+        return ResponseEntity.ok(wrapper);
     }
 
     @GetMapping("/search")
@@ -58,4 +67,3 @@ public class ApiController {
         return ResponseEntity.ok(searchService.search(query, site, offset, limit));
     }
 }
-

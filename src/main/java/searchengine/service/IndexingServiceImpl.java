@@ -1,32 +1,47 @@
 package searchengine.service;
 
 import lombok.RequiredArgsConstructor;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import searchengine.config.Site;
 import searchengine.config.SitesList;
+import searchengine.model.IndexEntity;
+import searchengine.model.LemmaEntity;
+import searchengine.model.PageEntity;
 import searchengine.model.SiteEntity;
+import searchengine.repository.IndexRepository;
+import searchengine.repository.LemmaRepository;
 import searchengine.repository.PageRepository;
-import searchengine.model.*;
-import searchengine.repository.*;
+import searchengine.repository.SiteRepository;
 
 import javax.transaction.Transactional;
-import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
+/**
+ * Реализация сервиса индексации.
+ *
+ * Важные моменты:
+ * - Многопоточная индексация (ExecutorService).
+ * - indexPage(url) обновляет/добавляет одну страницу.
+ * - indexSite выполняет индексацию для одного сайта (с установкой статусов).
+ * - crawlAndIndex рекурсивно обходит внутренние страницы и создаёт записи page/lemma/index.
+ */
 @Service
 @RequiredArgsConstructor
 public class IndexingServiceImpl implements IndexingService {
+
+    private static final Logger log = LoggerFactory.getLogger(IndexingServiceImpl.class);
 
     private final SitesList sitesList;
     private final SiteRepository siteRepository;
@@ -34,7 +49,6 @@ public class IndexingServiceImpl implements IndexingService {
     private final LemmaRepository lemmaRepository;
     private final IndexRepository indexRepository;
     private final MorphologyService morphologyService;
-    private static final Logger log = LoggerFactory.getLogger(IndexingServiceImpl.class);
 
     private volatile boolean running = false;
     private ExecutorService executor;
@@ -47,10 +61,16 @@ public class IndexingServiceImpl implements IndexingService {
         }
         log.info("Запрошен запуск индексации.");
         running = true;
+        // фиксированный пул; можно вынести в конфиг
         executor = Executors.newFixedThreadPool(4);
 
-        for (Site siteConfig : sitesList.getSites()) {
-            // submit каждому сайту задачу индексирования
+        List<Site> sites = sitesList.getSites();
+        if (sites == null || sites.isEmpty()) {
+            log.warn("Список сайтов пуст — нечего индексировать.");
+            return;
+        }
+
+        for (Site siteConfig : sites) {
             executor.submit(() -> {
                 try {
                     log.info("Запуск индексации для сайта: {}", siteConfig.getUrl());
@@ -80,25 +100,30 @@ public class IndexingServiceImpl implements IndexingService {
                     log.info("Пул потоков корректно завершён.");
                 }
             } catch (InterruptedException e) {
-                log.warn("Ожидание завершения пулa прервано.", e);
+                log.warn("Ожидание завершения пула прервано.", e);
                 Thread.currentThread().interrupt();
             }
         }
         log.info("Индексация остановлена.");
     }
 
-
     @Override
     public void indexPage(String url) {
-        var siteEntity = siteRepository.findAll().stream()
+        // Ищем сайт, к которому принадлежит URL (по конфигу в БД)
+        SiteEntity siteEntity = siteRepository.findAll().stream()
                 .filter(s -> url.startsWith(s.getUrl()))
                 .findFirst()
-                .orElseThrow(() -> new RuntimeException("Сайт не найден в конфиге"));
+                .orElseThrow(() -> new RuntimeException("Сайт не найден в конфиге: " + url));
+        // Выполняем синхронный обход и индексацию одной страницы
         crawlAndIndex(url, siteEntity);
     }
 
+    /**
+     * Индексация одного сайта (создаём запись SiteEntity и начинаем обход).
+     */
     @Transactional
     protected void indexSite(Site siteConfig) {
+        // Создаём/обновляем запись сайта в БД и помечаем статус INDEXING
         SiteEntity siteEntity = new SiteEntity();
         siteEntity.setUrl(siteConfig.getUrl());
         siteEntity.setName(siteConfig.getName());
@@ -107,22 +132,35 @@ public class IndexingServiceImpl implements IndexingService {
         siteEntity = siteRepository.save(siteEntity);
 
         try {
+            // Запускаем полный обход с корня
             crawlAndIndex(siteConfig.getUrl(), siteEntity);
+            // Если дошли до конца успешно — помечаем как INDEXED
             siteEntity.setStatus(SiteEntity.Status.INDEXED);
-        } catch (Exception e) {
-            siteEntity.setStatus(SiteEntity.Status.FAILED);
-            siteEntity.setLastError(e.getMessage());
-        } finally {
             siteEntity.setStatusTime(LocalDateTime.now());
+            siteEntity.setLastError(null);
+            siteRepository.save(siteEntity);
+        } catch (Exception e) {
+            log.error("Ошибка при индексации сайта {}: {}", siteConfig.getUrl(), e.toString(), e);
+            siteEntity.setStatus(SiteEntity.Status.FAILED);
+            siteEntity.setStatusTime(LocalDateTime.now());
+            siteEntity.setLastError(e.getMessage());
             siteRepository.save(siteEntity);
         }
     }
 
+    /**
+     * Рекурсивный обход и индексация одной страницы.
+     *
+     * @param url  полный URL страницы
+     * @param site сущность сайта (SiteEntity)
+     */
     private void crawlAndIndex(String url, SiteEntity site) {
         if (!running) {
             log.debug("Индексация остановлена — пропускаю: {}", url);
             return;
         }
+
+        // формируем путь относительно корня сайта
         String path = url.replaceFirst("^" + Pattern.quote(site.getUrl()), "");
         log.info("Crawling start: {}", url);
 
@@ -144,8 +182,12 @@ public class IndexingServiceImpl implements IndexingService {
                 log.info("Updated page id={} site={} path={}", page.getId(), site.getUrl(), page.getPath());
 
                 // удалить прежние индексы для этой страницы, чтобы пересоздать актуальные
-                indexRepository.deleteByPage(page);
-                log.debug("Deleted old indices for page id={}", page.getId());
+                try {
+                    indexRepository.deleteByPage(page);
+                    log.debug("Deleted old indices for page id={}", page.getId());
+                } catch (Exception ex) {
+                    log.warn("Не удалось удалить старые индексы для page id={}: {}", page.getId(), ex.getMessage());
+                }
             } else {
                 page = new PageEntity();
                 page.setSite(site);
@@ -162,23 +204,21 @@ public class IndexingServiceImpl implements IndexingService {
             for (String lemma : lemmas) {
                 freq.merge(lemma, 1, Integer::sum);
             }
-            log.info("Lemmas extracted for page id={} : tokens={} unique={}", page.getId(), lemmas.size(), freq.size());
 
-            // Сохраняем леммы и создаём индексные записи
+            // сохраняем или обновляем леммы и создаём связи (IndexEntity)
             for (var entry : freq.entrySet()) {
-                String lemmaStr = entry.getKey();
+                String lemma = entry.getKey();
                 int count = entry.getValue();
 
                 LemmaEntity lemmaEntity = lemmaRepository
-                        .findBySiteAndLemma(site, lemmaStr)
+                        .findBySiteAndLemma(site, lemma)
                         .orElseGet(() -> {
                             LemmaEntity e = new LemmaEntity();
                             e.setSite(site);
-                            e.setLemma(lemmaStr);
+                            e.setLemma(lemma);
                             e.setFrequency(0);
                             return e;
                         });
-
                 lemmaEntity.setFrequency(lemmaEntity.getFrequency() + count);
                 lemmaEntity = lemmaRepository.save(lemmaEntity);
 
@@ -189,25 +229,34 @@ public class IndexingServiceImpl implements IndexingService {
                 indexRepository.save(idx);
             }
 
-            // Рекурсивный обход ссылок (по внутренним)
+            // рекурсивно обходим все внутренние ссылки
             Elements links = doc.select("a[href]");
             for (Element link : links) {
                 String absUrl = link.absUrl("href");
+                // проверяем, что ссылка внутри сайта и что индексация всё ещё разрешена
                 if (absUrl.startsWith(site.getUrl()) && running) {
-                    crawlAndIndex(absUrl, site);
+                    // избегаем бесконечных циклов и дублей — проверим, не проиндексирована ли уже
+                    String childPath = absUrl.replaceFirst("^" + Pattern.quote(site.getUrl()), "");
+                    if (!pageRepository.existsBySiteAndPath(site, childPath)) {
+                        // рекурсивно индексируем
+                        crawlAndIndex(absUrl, site);
+                    }
                 }
             }
-
-            log.info("Crawling finished: {} (page id={})", url, page.getId());
         } catch (IOException e) {
-            log.error("Ошибка при чтении {} : {}", url, e.getMessage());
+            // сохраняем ошибку сайта (последний error) и не прерываем весь процесс
+            log.warn("Ошибка чтения {}: {}", url, e.getMessage());
             site.setLastError("Ошибка чтения " + url + ": " + e.getMessage());
             siteRepository.save(site);
         } catch (Exception e) {
             log.error("Unexpected error while crawling {}: {}", url, e.toString(), e);
-            site.setLastError("Unexpected error: " + e.getMessage());
+            site.setLastError("Unexpected error while crawling " + url + ": " + e.getMessage());
             siteRepository.save(site);
         }
     }
-}
 
+    @Override
+    public boolean isIndexing() {
+        return running;
+    }
+}

@@ -22,6 +22,7 @@ public class StatisticsServiceImpl implements StatisticsService {
     private final SiteRepository siteRepository;
     private final PageRepository pageRepository;
     private final LemmaRepository lemmaRepository;
+    private final IndexingService indexingService;
 
     private final DateTimeFormatter dtf = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
 
@@ -33,8 +34,18 @@ public class StatisticsServiceImpl implements StatisticsService {
         StatisticsResponse.Total total = new StatisticsResponse.Total();
         int configuredSites = sitesList.getSites() != null ? sitesList.getSites().size() : 0;
         total.setSites(configuredSites);
-        total.setPages((int) pageRepository.count());   // потенциальная конверсия long -> int
+        // безопасно приводим long -> int (для небольших тестовых данных)
+        total.setPages((int) pageRepository.count());
         total.setLemmas((int) lemmaRepository.count());
+
+        // флаг: идёт ли индексация
+        boolean running = false;
+        try {
+            running = indexingService != null && indexingService.isIndexing();
+        } catch (Exception ignored) { }
+        // ВАЖНО: используем setIndexing, т.к. поле называется 'indexing'
+        total.setIndexing(running);
+
         response.setTotal(total);
 
         List<StatisticsResponse.Detailed> detailedList = new ArrayList<>();
@@ -53,11 +64,13 @@ public class StatisticsServiceImpl implements StatisticsService {
                     long lemmasCount = lemmaRepository.countBySite(siteEntity);
                     d.setPages((int) pagesCount);
                     d.setLemmas((int) lemmasCount);
+                    d.setError(siteEntity.getLastError());
                 } else {
                     d.setStatus("NOT_INDEXED");
                     d.setStatusTime(null);
                     d.setPages(0);
                     d.setLemmas(0);
+                    d.setError(null);
                 }
                 detailedList.add(d);
             }
