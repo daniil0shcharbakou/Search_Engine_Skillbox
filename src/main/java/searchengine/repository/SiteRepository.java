@@ -8,6 +8,8 @@ import java.util.Optional;
 
 public interface SiteRepository extends JpaRepository<SiteEntity, Integer> {
 
+    Optional<SiteEntity> findByUrl(String url);
+
     /**
      * Возвращает первый попавшийся сайт с таким url (без падений при нескольких совпадениях).
      */

@@ -3,67 +3,145 @@ package searchengine.controllers;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import searchengine.dto.SimpleResponse;
-import searchengine.dto.statistics.StatisticsApiResponse;
-import searchengine.dto.statistics.StatisticsResponse;
 import searchengine.dto.search.SearchResponse;
+import searchengine.dto.statistics.StatisticsResponse;
 import searchengine.service.IndexingService;
 import searchengine.service.SearchService;
 import searchengine.service.StatisticsService;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * REST API controller used by frontend (index.html + scripts.js).
+ */
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
 public class ApiController {
-    private final IndexingService indexingService;
+
     private final StatisticsService statisticsService;
+    private final IndexingService indexingService;
     private final SearchService searchService;
 
-    @GetMapping("/startIndexing")
-    public ResponseEntity<SimpleResponse> startIndexing() {
-        try {
-            indexingService.startIndexing();
-            return ResponseEntity.ok(new SimpleResponse(true, null));
-        } catch (RuntimeException e) {
-            return ResponseEntity.ok(new SimpleResponse(false, e.getMessage()));
-        }
-    }
+    /**
+     * GET /api/statistics
+     * Returns: { result: boolean, statistics: { total: ..., detailed: [...] } }
+     */
+    @GetMapping("/statistics")
+    public ResponseEntity<Map<String, Object>> statistics() {
+        StatisticsResponse resp = statisticsService.getStatistics();
 
-    @GetMapping("/stopIndexing")
-    public ResponseEntity<SimpleResponse> stopIndexing() {
-        indexingService.stopIndexing();
-        return ResponseEntity.ok(new SimpleResponse(true, null));
-    }
+        Map<String, Object> body = new HashMap<>();
+        boolean resultFlag = false;
 
-    @PostMapping("/indexPage")
-    public ResponseEntity<SimpleResponse> indexPage(@RequestParam("url") String url) {
-        try {
-            indexingService.indexPage(url);
-            return ResponseEntity.ok(new SimpleResponse(true, null));
-        } catch (RuntimeException e) {
-            return ResponseEntity.ok(new SimpleResponse(false, e.getMessage()));
+        if (resp != null) {
+            // Попробуем получить булево поле result через reflection:
+            // сначала getResult(), затем isResult(), если первый метод отсутствует.
+            try {
+                Method m = resp.getClass().getMethod("getResult");
+                Object v = m.invoke(resp);
+                if (v instanceof Boolean) resultFlag = (Boolean) v;
+            } catch (NoSuchMethodException ignored) {
+                try {
+                    Method m2 = resp.getClass().getMethod("isResult");
+                    Object v2 = m2.invoke(resp);
+                    if (v2 instanceof Boolean) resultFlag = (Boolean) v2;
+                } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException ignored2) {
+                    // методов нет или вызов не удался — оставляем false
+                }
+            } catch (IllegalAccessException | InvocationTargetException ignored) {
+                // если вызов не удался — оставляем false
+            }
         }
+
+        body.put("result", resultFlag);
+
+        Map<String, Object> statistics = new HashMap<>();
+        statistics.put("total", resp != null ? resp.getTotal() : null);
+        statistics.put("detailed", resp != null ? resp.getDetailed() : null);
+
+        body.put("statistics", statistics);
+        return ResponseEntity.ok(body);
     }
 
     /**
-     * Важно: фронтенд ожидает структуру:
-     * { result: true, statistics: { total: {...}, detailed: [...] } }
+     * GET /api/startIndexing
+     * Returns { result: true/false, error: null|string }
      */
-    @GetMapping("/statistics")
-    public ResponseEntity<StatisticsApiResponse> statistics() {
-        StatisticsResponse statistics = statisticsService.getStatistics();
-        StatisticsApiResponse wrapper = new StatisticsApiResponse();
-        wrapper.setResult(statistics.isResult());
-        wrapper.setStatistics(statistics);
-        return ResponseEntity.ok(wrapper);
+    @GetMapping("/startIndexing")
+    public Map<String, Object> startIndexing() {
+        Map<String, Object> resp = new HashMap<>();
+        try {
+            indexingService.startIndexing();
+            resp.put("result", true);
+            resp.put("error", null);
+        } catch (RuntimeException ex) {
+            resp.put("result", false);
+            resp.put("error", ex.getMessage());
+        } catch (Exception ex) {
+            resp.put("result", false);
+            resp.put("error", "Internal error: " + ex.getMessage());
+        }
+        return resp;
     }
 
+    /**
+     * GET /api/stopIndexing
+     */
+    @GetMapping("/stopIndexing")
+    public Map<String, Object> stopIndexing() {
+        Map<String, Object> resp = new HashMap<>();
+        try {
+            indexingService.stopIndexing();
+            resp.put("result", true);
+            resp.put("error", null);
+        } catch (Exception ex) {
+            resp.put("result", false);
+            resp.put("error", "Internal error: " + ex.getMessage());
+        }
+        return resp;
+    }
+
+    /**
+     * POST /api/indexPage?url=...
+     * Returns { result: true/false, error: null|string }
+     */
+    @PostMapping("/indexPage")
+    public Map<String, Object> indexPage(@RequestParam("url") String url) {
+        Map<String, Object> resp = new HashMap<>();
+        try {
+            indexingService.indexPage(url);
+            resp.put("result", true);
+            resp.put("error", null);
+        } catch (RuntimeException ex) {
+            resp.put("result", false);
+            resp.put("error", ex.getMessage());
+        } catch (Exception ex) {
+            resp.put("result", false);
+            resp.put("error", "Internal error: " + ex.getMessage());
+        }
+        return resp;
+    }
+
+    /**
+     * GET /api/search?query=...&site=...&offset=...&limit=...
+     * Returns SearchResponse DTO directly (frontend expects that shape).
+     */
     @GetMapping("/search")
-    public ResponseEntity<SearchResponse> search(
-            @RequestParam String query,
-            @RequestParam(required = false) String site,
-            @RequestParam(defaultValue = "0") int offset,
-            @RequestParam(defaultValue = "20") int limit) {
-        return ResponseEntity.ok(searchService.search(query, site, offset, limit));
+    public SearchResponse search(
+            @RequestParam(value = "query", required = false) String query,
+            @RequestParam(value = "site", required = false) String site,
+            @RequestParam(value = "offset", required = false, defaultValue = "0") Integer offset,
+            @RequestParam(value = "limit", required = false, defaultValue = "10") Integer limit
+    ) {
+        try {
+            return searchService.search(query, site, offset, limit);
+        } catch (Exception ex) {
+            // На ошибку возвращаем совместимый с фронтендом пустой ответ
+            return new SearchResponse(false, 0, java.util.Collections.emptyList());
+        }
     }
 }

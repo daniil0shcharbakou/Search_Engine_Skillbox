@@ -7,6 +7,7 @@ import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import searchengine.config.Site;
 import searchengine.config.SitesList;
@@ -28,15 +29,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-/**
- * Реализация сервиса индексации.
- *
- * Важные моменты:
- * - Многопоточная индексация (ExecutorService).
- * - indexPage(url) обновляет/добавляет одну страницу.
- * - indexSite выполняет индексацию для одного сайта (с установкой статусов).
- * - crawlAndIndex рекурсивно обходит внутренние страницы и создаёт записи page/lemma/index.
- */
 @Service
 @RequiredArgsConstructor
 public class IndexingServiceImpl implements IndexingService {
@@ -123,13 +115,39 @@ public class IndexingServiceImpl implements IndexingService {
      */
     @Transactional
     protected void indexSite(Site siteConfig) {
-        // Создаём/обновляем запись сайта в БД и помечаем статус INDEXING
-        SiteEntity siteEntity = new SiteEntity();
-        siteEntity.setUrl(siteConfig.getUrl());
-        siteEntity.setName(siteConfig.getName());
+        // Пытаемся найти уже существующую запись по URL
+        Optional<SiteEntity> existing = siteRepository.findByUrl(siteConfig.getUrl());
+
+        SiteEntity siteEntity;
+        if (existing.isPresent()) {
+            siteEntity = existing.get();
+            // Обновляем имя (если изменилось)
+            siteEntity.setName(siteConfig.getName());
+        } else {
+            siteEntity = new SiteEntity();
+            siteEntity.setUrl(siteConfig.getUrl());
+            siteEntity.setName(siteConfig.getName());
+        }
+
         siteEntity.setStatus(SiteEntity.Status.INDEXING);
         siteEntity.setStatusTime(LocalDateTime.now());
-        siteEntity = siteRepository.save(siteEntity);
+
+        try {
+            siteEntity = siteRepository.save(siteEntity);
+        } catch (DataIntegrityViolationException ex) {
+            // В редком случае конкурентной вставки — снова прочитаем запись и используем её
+            log.warn("DataIntegrityViolation при сохранении SiteEntity для URL {}: {}. Попытка повторного чтения.", siteConfig.getUrl(), ex.getMessage());
+            Optional<SiteEntity> re = siteRepository.findByUrl(siteConfig.getUrl());
+            if (re.isPresent()) {
+                siteEntity = re.get();
+                siteEntity.setStatus(SiteEntity.Status.INDEXING);
+                siteEntity.setStatusTime(LocalDateTime.now());
+                siteEntity = siteRepository.save(siteEntity);
+            } else {
+                // если всё же не удалось — пробрасываем
+                throw ex;
+            }
+        }
 
         try {
             // Запускаем полный обход с корня
@@ -202,6 +220,7 @@ public class IndexingServiceImpl implements IndexingService {
             List<String> lemmas = morphologyService.lemmatize(text);
             Map<String, Integer> freq = new HashMap<>();
             for (String lemma : lemmas) {
+                if (lemma == null || lemma.isBlank()) continue;
                 freq.merge(lemma, 1, Integer::sum);
             }
 
