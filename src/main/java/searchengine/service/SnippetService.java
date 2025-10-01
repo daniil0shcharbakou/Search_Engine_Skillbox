@@ -5,24 +5,22 @@ import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 @Service
 public class SnippetService {
 
-    // Максимальная длина куска вокруг найденного слова
     private static final int WINDOW = 60;
-    // Максимальная итоговая длина сниппета
     private static final int MAX_SNIPPET_LENGTH = 300;
 
     public String generateSnippet(String content, List<String> queryWords) {
         if (content == null || content.isBlank()) return "";
 
-        // Удаляем HTML и нормализуем пробельные символы
         String text = Jsoup.parse(content).text();
         text = text.replaceAll("\\s+", " ").trim();
         String lower = text.toLowerCase(Locale.ROOT);
 
-        // Подготавливаем набор поисковых слов (без пустых)
         Set<String> words = queryWords == null ? Collections.emptySet()
                 : queryWords.stream()
                 .filter(Objects::nonNull)
@@ -33,25 +31,26 @@ public class SnippetService {
 
         List<String> segments = new ArrayList<>();
 
-        // Ищем вхождения слов — берем до 2-х фрагментов
         for (String w : words) {
+            if (w.isBlank()) continue;
             int idx = lower.indexOf(w);
             if (idx >= 0) {
-                segments.add(extractSegment(text, idx, w.length()));
+                String seg = extractSegment(text, idx, w.length());
+                seg = highlightSegment(seg, w);
+                segments.add(seg);
                 if (segments.size() >= 2) break;
             }
         }
 
-        // Если ничего не найдено — вернём начало текста (fallback)
         if (segments.isEmpty()) {
-            if (text.length() <= MAX_SNIPPET_LENGTH) return text;
-            return text.substring(0, MAX_SNIPPET_LENGTH).trim() + "...";
+            String fallback = text.length() <= MAX_SNIPPET_LENGTH ? text
+                    : text.substring(0, MAX_SNIPPET_LENGTH).trim() + "...";
+            return fallback;
         }
 
         String snippet = String.join(" ... ", segments);
         if (snippet.length() > MAX_SNIPPET_LENGTH) {
             snippet = snippet.substring(0, MAX_SNIPPET_LENGTH).trim();
-            // не обрываем слово в середине (попробуем обрезать до последнего пробела)
             int lastSpace = snippet.lastIndexOf(' ');
             if (lastSpace > snippet.length() / 2) snippet = snippet.substring(0, lastSpace);
             snippet = snippet + "...";
@@ -67,5 +66,22 @@ public class SnippetService {
         if (start > 0) seg = "..." + seg;
         if (end < text.length()) seg = seg + "...";
         return seg;
+    }
+
+    private String highlightSegment(String seg, String wordLower) {
+        if (seg == null || seg.isEmpty() || wordLower == null || wordLower.isBlank()) return seg;
+
+        String patternStr = "\\b" + Pattern.quote(wordLower) + "\\b";
+        Pattern p = Pattern.compile(patternStr, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+        Matcher m = p.matcher(seg);
+
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            String match = m.group();
+            String replacement = "<b>" + Matcher.quoteReplacement(match) + "</b>";
+            m.appendReplacement(sb, replacement);
+        }
+        m.appendTail(sb);
+        return sb.toString();
     }
 }

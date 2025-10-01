@@ -12,9 +12,6 @@ import searchengine.repository.SiteRepository;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Сервис статистики.
- */
 @Service
 @RequiredArgsConstructor
 public class StatisticsServiceImpl implements StatisticsService {

@@ -5,7 +5,8 @@ import lombok.Data;
 import javax.persistence.*;
 
 @Entity
-@Table(name = "page")
+@Table(name = "page",
+        uniqueConstraints = @UniqueConstraint(columnNames = {"site_id", "path"}))
 @Data
 public class PageEntity {
     @Id

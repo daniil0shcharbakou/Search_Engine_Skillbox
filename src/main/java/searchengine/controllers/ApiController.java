@@ -14,9 +14,6 @@ import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * REST API controller used by frontend (index.html + scripts.js).
- */
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
@@ -26,10 +23,6 @@ public class ApiController {
     private final IndexingService indexingService;
     private final SearchService searchService;
 
-    /**
-     * GET /api/statistics
-     * Returns: { result: boolean, statistics: { total: ..., detailed: [...] } }
-     */
     @GetMapping("/statistics")
     public ResponseEntity<Map<String, Object>> statistics() {
         StatisticsResponse resp = statisticsService.getStatistics();
@@ -38,8 +31,6 @@ public class ApiController {
         boolean resultFlag = false;
 
         if (resp != null) {
-            // Попробуем получить булево поле result через reflection:
-            // сначала getResult(), затем isResult(), если первый метод отсутствует.
             try {
                 Method m = resp.getClass().getMethod("getResult");
                 Object v = m.invoke(resp);
@@ -67,10 +58,6 @@ public class ApiController {
         return ResponseEntity.ok(body);
     }
 
-    /**
-     * GET /api/startIndexing
-     * Returns { result: true/false, error: null|string }
-     */
     @GetMapping("/startIndexing")
     public Map<String, Object> startIndexing() {
         Map<String, Object> resp = new HashMap<>();
@@ -88,9 +75,6 @@ public class ApiController {
         return resp;
     }
 
-    /**
-     * GET /api/stopIndexing
-     */
     @GetMapping("/stopIndexing")
     public Map<String, Object> stopIndexing() {
         Map<String, Object> resp = new HashMap<>();
@@ -105,10 +89,6 @@ public class ApiController {
         return resp;
     }
 
-    /**
-     * POST /api/indexPage?url=...
-     * Returns { result: true/false, error: null|string }
-     */
     @PostMapping("/indexPage")
     public Map<String, Object> indexPage(@RequestParam("url") String url) {
         Map<String, Object> resp = new HashMap<>();
@@ -126,10 +106,6 @@ public class ApiController {
         return resp;
     }
 
-    /**
-     * GET /api/search?query=...&site=...&offset=...&limit=...
-     * Returns SearchResponse DTO directly (frontend expects that shape).
-     */
     @GetMapping("/search")
     public SearchResponse search(
             @RequestParam(value = "query", required = false) String query,
@@ -140,7 +116,6 @@ public class ApiController {
         try {
             return searchService.search(query, site, offset, limit);
         } catch (Exception ex) {
-            // На ошибку возвращаем совместимый с фронтендом пустой ответ
             return new SearchResponse(false, 0, java.util.Collections.emptyList());
         }
     }

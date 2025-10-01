@@ -29,7 +29,6 @@ public class SearchServiceImpl implements SearchService {
             return new SearchResponse(false, 0, Collections.emptyList());
         }
 
-        // 1) Лемматизация запроса (используем леммы для сопоставления с индексом)
         List<String> lemmas = morphologyService.lemmatize(query).stream()
                 .filter(s -> s != null && !s.isBlank())
                 .map(String::toLowerCase)
@@ -40,7 +39,6 @@ public class SearchServiceImpl implements SearchService {
             return new SearchResponse(true, 0, Collections.emptyList());
         }
 
-        // 2) Подготовка DF (document frequency) и N (количество документов)
         Map<String, Long> dfMap = new HashMap<>();
         long N;
         if (site == null || site.isBlank()) {
@@ -64,7 +62,6 @@ public class SearchServiceImpl implements SearchService {
             return new SearchResponse(true, 0, Collections.emptyList());
         }
 
-        // 3) Получаем TF (term frequency) по страницам: (pageId, lemma, tf)
         List<Object[]> tfRows;
         if (site == null || site.isBlank()) {
             tfRows = indexRepository.findPageLemmaTfByLemmas(lemmas);
@@ -72,7 +69,6 @@ public class SearchServiceImpl implements SearchService {
             tfRows = indexRepository.findPageLemmaTfByLemmasAndSite(lemmas, site);
         }
 
-        // 4) Собираем структуру: pageId -> (lemma -> tf)
         Map<Integer, Map<String, Double>> pageLemmaTf = new HashMap<>();
         for (Object[] r : tfRows) {
             Integer pageId = (Integer) r[0];
@@ -87,7 +83,6 @@ public class SearchServiceImpl implements SearchService {
             return new SearchResponse(true, 0, Collections.emptyList());
         }
 
-        // 5) Вычисляем IDF для каждой lemma: idf = ln((N + 1) / (df + 1))
         Map<String, Double> idfMap = new HashMap<>();
         for (String lemma : lemmas) {
             long df = dfMap.getOrDefault(lemma, 0L);
@@ -95,7 +90,6 @@ public class SearchServiceImpl implements SearchService {
             idfMap.put(lemma, idf);
         }
 
-        // 6) Считаем score для каждой page: sum(tf * idf)
         List<PageScore> pageScores = new ArrayList<>();
         for (Map.Entry<Integer, Map<String, Double>> entry : pageLemmaTf.entrySet()) {
             Integer pageId = entry.getKey();
@@ -109,11 +103,9 @@ public class SearchServiceImpl implements SearchService {
                 score += tf * idf;
             }
 
-            // опционально: можно нормализовать score по длине документа (необязательно)
             pageScores.add(new PageScore(pageId, (float) score));
         }
 
-        // 7) Сортируем по score desc
         pageScores.sort((a, b) -> Float.compare(b.score, a.score));
 
         int total = pageScores.size();
@@ -121,17 +113,14 @@ public class SearchServiceImpl implements SearchService {
             return new SearchResponse(true, 0, Collections.emptyList());
         }
 
-        // 8) Пагинация
         int from = Math.max(0, offset);
         int to = Math.min(pageScores.size(), offset + Math.max(1, limit));
         List<PageScore> pageScoresPage = pageScores.subList(from, to);
 
-        // 9) Достаём страницы и собираем SearchItem в том же порядке
         List<Integer> ids = pageScoresPage.stream().map(ps -> ps.pageId).collect(Collectors.toList());
         List<PageEntity> pages = pageRepository.findAllWithSiteByIdIn(ids);
         Map<Integer, PageEntity> pageById = pages.stream().collect(Collectors.toMap(PageEntity::getId, p -> p));
 
-        // подготовим токены оригинального запроса для сниппета (fallback на леммы)
         List<String> queryTokens = Arrays.stream(query.split("\\s+"))
                 .map(s -> s.replaceAll("[^\\p{L}\\p{Nd}]", ""))
                 .map(String::trim)
@@ -149,7 +138,6 @@ public class SearchServiceImpl implements SearchService {
             item.setUri(buildFullUrl(page));
             item.setTitle(extractTitle(page));
 
-            // сниппет: используем оригинальные токены если есть, иначе — леммы
             List<String> snippetWords = !queryTokens.isEmpty() ? queryTokens : lemmas;
             item.setSnippet(snippetService.generateSnippet(page.getContent(), snippetWords));
 
@@ -164,9 +152,22 @@ public class SearchServiceImpl implements SearchService {
         String siteUrl = page.getSite().getUrl();
         String path = page.getPath();
         if (path == null) path = "";
-        if (!siteUrl.endsWith("/") && !path.startsWith("/")) return siteUrl + "/" + path;
-        return siteUrl + path;
+
+        String trimmed = path.trim();
+
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            return trimmed;
+        }
+
+        if (!siteUrl.endsWith("/") && !trimmed.startsWith("/")) {
+            return siteUrl + "/" + trimmed;
+        } else if (siteUrl.endsWith("/") && trimmed.startsWith("/")) {
+            return siteUrl + trimmed.substring(1);
+        } else {
+            return siteUrl + trimmed;
+        }
     }
+
 
     private String extractTitle(PageEntity page) {
         String content = page.getContent();

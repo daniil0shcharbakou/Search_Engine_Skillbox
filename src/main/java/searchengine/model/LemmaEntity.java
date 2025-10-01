@@ -5,7 +5,8 @@ import lombok.Data;
 import javax.persistence.*;
 
 @Entity
-@Table(name = "lemma")
+@Table(name = "lemma",
+        uniqueConstraints = @UniqueConstraint(columnNames = {"site_id", "lemma"}))
 @Data
 public class LemmaEntity {
     @Id
@@ -13,6 +14,7 @@ public class LemmaEntity {
     private Integer id;
 
     @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "site_id", nullable = false)
     private SiteEntity site;
 
     private String lemma;

@@ -15,10 +15,6 @@ public class StatisticsResponse {
         private int sites;
         private int pages;
         private int lemmas;
-        /**
-         * Фронтенд ожидает флаг о том, идёт ли индексирование.
-         * Название поля — "indexing" чтобы Lombok корректно сгенерировал setIndexing(...)
-         */
         private boolean indexing;
     }
 
@@ -30,9 +26,6 @@ public class StatisticsResponse {
         private String statusTime;
         private int pages;
         private int lemmas;
-        /**
-         * Сообщение об ошибке (если есть)
-         */
         private String error;
     }
 }
