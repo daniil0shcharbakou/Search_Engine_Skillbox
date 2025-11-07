@@ -25,43 +25,87 @@ public class SearchServiceImpl implements SearchService {
     @Override
     @Transactional(readOnly = true)
     public SearchResponse search(String query, String site, int offset, int limit) {
-        if (query == null || query.isBlank()) {
+        try {
+            if (query == null || query.isBlank()) {
+                return new SearchResponse(false, 0, Collections.emptyList());
+            }
+
+            List<String> lemmas = extractLemmas(query);
+            if (lemmas.isEmpty()) {
+                return new SearchResponse(true, 0, Collections.emptyList());
+            }
+
+            Map<String, Long> dfMap = buildDfMap(lemmas, site);
+            long totalPages = countTotalPages(site);
+            if (totalPages <= 0) {
+                return new SearchResponse(true, 0, Collections.emptyList());
+            }
+
+            Map<Integer, Map<String, Double>> pageLemmaTf = buildPageLemmaTfMap(lemmas, site);
+            if (pageLemmaTf.isEmpty()) {
+                return new SearchResponse(true, 0, Collections.emptyList());
+            }
+
+            Map<String, Double> idfMap = calculateIdfMap(lemmas, dfMap, totalPages);
+            List<PageScore> pageScores = calculatePageScores(pageLemmaTf, idfMap);
+            pageScores.sort((a, b) -> Float.compare(b.score, a.score));
+
+            int total = pageScores.size();
+            if (total == 0) {
+                return new SearchResponse(true, 0, Collections.emptyList());
+            }
+
+            List<PageScore> pageScoresPage = getPageScoresPage(pageScores, offset, limit);
+            List<SearchItem> items = buildSearchItems(pageScoresPage, query, lemmas);
+
+            items.forEach(item -> {
+                if (item != null) {
+                    item.setUri("");
+                }
+            });
+
+            return new SearchResponse(true, total, items);
+        } catch (Exception ex) {
             return new SearchResponse(false, 0, Collections.emptyList());
         }
+    }
 
-        List<String> lemmas = morphologyService.lemmatize(query).stream()
+    private List<String> extractLemmas(String query) {
+        return morphologyService.lemmatize(query).stream()
                 .filter(s -> s != null && !s.isBlank())
                 .map(String::toLowerCase)
                 .distinct()
                 .collect(Collectors.toList());
+    }
 
-        if (lemmas.isEmpty()) {
-            return new SearchResponse(true, 0, Collections.emptyList());
-        }
-
+    private Map<String, Long> buildDfMap(List<String> lemmas, String site) {
         Map<String, Long> dfMap = new HashMap<>();
-        long N;
+        List<Object[]> dfRows;
+        
         if (site == null || site.isBlank()) {
-            List<Object[]> dfRows = indexRepository.countDocsByLemma(lemmas);
-            for (Object[] r : dfRows) {
-                String lemma = (String) r[0];
-                Number cnt = (Number) r[1];
-                dfMap.put(lemma, cnt == null ? 0L : cnt.longValue());
-            }
-            N = indexRepository.countDistinctPages();
+            dfRows = indexRepository.countDocsByLemma(lemmas);
         } else {
-            List<Object[]> dfRows = indexRepository.countDocsByLemmaAndSite(lemmas, site);
-            for (Object[] r : dfRows) {
-                String lemma = (String) r[0];
-                Number cnt = (Number) r[1];
-                dfMap.put(lemma, cnt == null ? 0L : cnt.longValue());
-            }
-            N = indexRepository.countDistinctPagesBySite(site);
+            dfRows = indexRepository.countDocsByLemmaAndSite(lemmas, site);
         }
-        if (N <= 0) {
-            return new SearchResponse(true, 0, Collections.emptyList());
+        
+        for (Object[] r : dfRows) {
+            String lemma = (String) r[0];
+            Number cnt = (Number) r[1];
+            dfMap.put(lemma, cnt == null ? 0L : cnt.longValue());
         }
+        
+        return dfMap;
+    }
 
+    private long countTotalPages(String site) {
+        if (site == null || site.isBlank()) {
+            return indexRepository.countDistinctPages();
+        } else {
+            return indexRepository.countDistinctPagesBySite(site);
+        }
+    }
+
+    private Map<Integer, Map<String, Double>> buildPageLemmaTfMap(List<String> lemmas, String site) {
         List<Object[]> tfRows;
         if (site == null || site.isBlank()) {
             tfRows = indexRepository.findPageLemmaTfByLemmas(lemmas);
@@ -78,74 +122,88 @@ public class SearchServiceImpl implements SearchService {
 
             pageLemmaTf.computeIfAbsent(pageId, k -> new HashMap<>()).put(lemma, tf);
         }
+        
+        return pageLemmaTf;
+    }
 
-        if (pageLemmaTf.isEmpty()) {
-            return new SearchResponse(true, 0, Collections.emptyList());
-        }
-
+    private Map<String, Double> calculateIdfMap(List<String> lemmas, Map<String, Long> dfMap, long totalPages) {
         Map<String, Double> idfMap = new HashMap<>();
         for (String lemma : lemmas) {
             long df = dfMap.getOrDefault(lemma, 0L);
-            double idf = Math.log((double)(N + 1) / (double)(df + 1)); // natural log
+            double idf = Math.log((double)(totalPages + 1) / (double)(df + 1));
             idfMap.put(lemma, idf);
         }
+        return idfMap;
+    }
 
+    private List<PageScore> calculatePageScores(Map<Integer, Map<String, Double>> pageLemmaTf, Map<String, Double> idfMap) {
         List<PageScore> pageScores = new ArrayList<>();
         for (Map.Entry<Integer, Map<String, Double>> entry : pageLemmaTf.entrySet()) {
             Integer pageId = entry.getKey();
             Map<String, Double> lemmaTfMap = entry.getValue();
 
-            double score = 0.0;
-            for (Map.Entry<String, Double> lt : lemmaTfMap.entrySet()) {
-                String lemma = lt.getKey();
-                double tf = lt.getValue();
-                double idf = idfMap.getOrDefault(lemma, 0.0);
-                score += tf * idf;
-            }
-
+            double score = calculateScore(lemmaTfMap, idfMap);
             pageScores.add(new PageScore(pageId, (float) score));
         }
+        return pageScores;
+    }
 
-        pageScores.sort((a, b) -> Float.compare(b.score, a.score));
-
-        int total = pageScores.size();
-        if (total == 0) {
-            return new SearchResponse(true, 0, Collections.emptyList());
+    private double calculateScore(Map<String, Double> lemmaTfMap, Map<String, Double> idfMap) {
+        double score = 0.0;
+        for (Map.Entry<String, Double> lt : lemmaTfMap.entrySet()) {
+            String lemma = lt.getKey();
+            double tf = lt.getValue();
+            double idf = idfMap.getOrDefault(lemma, 0.0);
+            score += tf * idf;
         }
+        return score;
+    }
 
+    private List<PageScore> getPageScoresPage(List<PageScore> pageScores, int offset, int limit) {
         int from = Math.max(0, offset);
         int to = Math.min(pageScores.size(), offset + Math.max(1, limit));
-        List<PageScore> pageScoresPage = pageScores.subList(from, to);
+        return pageScores.subList(from, to);
+    }
 
+    private List<SearchItem> buildSearchItems(List<PageScore> pageScoresPage, String query, List<String> lemmas) {
         List<Integer> ids = pageScoresPage.stream().map(ps -> ps.pageId).collect(Collectors.toList());
         List<PageEntity> pages = pageRepository.findAllWithSiteByIdIn(ids);
         Map<Integer, PageEntity> pageById = pages.stream().collect(Collectors.toMap(PageEntity::getId, p -> p));
 
-        List<String> queryTokens = Arrays.stream(query.split("\\s+"))
-                .map(s -> s.replaceAll("[^\\p{L}\\p{Nd}]", ""))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
-
+        List<String> queryTokens = extractQueryTokens(query);
         List<SearchItem> items = new ArrayList<>();
+        
         for (PageScore ps : pageScoresPage) {
             PageEntity page = pageById.get(ps.pageId);
             if (page == null) continue;
 
-            SearchItem item = new SearchItem();
-            item.setSite(page.getSite().getUrl());
-            item.setSiteName(page.getSite().getName());
-            item.setUri(buildFullUrl(page));
-            item.setTitle(extractTitle(page));
-
-            List<String> snippetWords = !queryTokens.isEmpty() ? queryTokens : lemmas;
-            item.setSnippet(snippetService.generateSnippet(page.getContent(), snippetWords));
-
-            item.setRelevance(ps.score);
+            SearchItem item = createSearchItem(page, ps, queryTokens, lemmas);
             items.add(item);
         }
+        
+        return items;
+    }
 
-        return new SearchResponse(true, total, items);
+    private List<String> extractQueryTokens(String query) {
+        return Arrays.stream(query.split("\\s+"))
+                .map(s -> s.replaceAll("[^\\p{L}\\p{Nd}]", ""))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toList());
+    }
+
+    private SearchItem createSearchItem(PageEntity page, PageScore ps, List<String> queryTokens, List<String> lemmas) {
+        SearchItem item = new SearchItem();
+        item.setSite(page.getSite().getUrl());
+        item.setSiteName(page.getSite().getName());
+        item.setUri(buildFullUrl(page));
+        item.setTitle(extractTitle(page));
+
+        List<String> snippetWords = !queryTokens.isEmpty() ? queryTokens : lemmas;
+        item.setSnippet(snippetService.generateSnippet(page.getContent(), snippetWords));
+
+        item.setRelevance(ps.score);
+        return item;
     }
 
     private String buildFullUrl(PageEntity page) {
@@ -155,10 +213,26 @@ public class SearchServiceImpl implements SearchService {
 
         String trimmed = path.trim();
 
+        // Если path уже содержит полный URL
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            // Нормализуем siteUrl для сравнения (убираем завершающий слэш)
+            String normalizedSiteUrl = siteUrl.endsWith("/") ? siteUrl.substring(0, siteUrl.length() - 1) : siteUrl;
+            String normalizedPath = trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
+            
+            // Проверяем, не содержит ли path уже siteUrl (чтобы избежать дублирования)
+            if (normalizedPath.startsWith(normalizedSiteUrl)) {
+                return trimmed;
+            }
+            // Если это другой домен, возвращаем как есть
             return trimmed;
         }
 
+        // Если path пустой, возвращаем siteUrl с завершающим слэшем
+        if (trimmed.isEmpty()) {
+            return siteUrl.endsWith("/") ? siteUrl : siteUrl + "/";
+        }
+
+        // Нормализуем слэши
         if (!siteUrl.endsWith("/") && !trimmed.startsWith("/")) {
             return siteUrl + "/" + trimmed;
         } else if (siteUrl.endsWith("/") && trimmed.startsWith("/")) {

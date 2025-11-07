@@ -1,9 +1,11 @@
 package searchengine.service;
 
+import searchengine.dto.SimpleResponse;
+
 public interface IndexingService {
-    void startIndexing();
-    void stopIndexing();
-    void indexPage(String url);
+    SimpleResponse startIndexing();
+    SimpleResponse stopIndexing();
+    SimpleResponse indexPage(String url);
 
     boolean isIndexing();
 }
