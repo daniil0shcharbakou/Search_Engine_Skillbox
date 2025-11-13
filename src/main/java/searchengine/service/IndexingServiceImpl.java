@@ -144,11 +144,33 @@ public class IndexingServiceImpl implements IndexingService {
     @Override
     public SimpleResponse indexPage(String url) {
         try {
-            SiteEntity siteEntity = siteRepository.findAll().stream()
-                    .filter(s -> url.startsWith(s.getUrl()))
+            // Проверяем наличие сайта в конфигурации
+            List<Site> sites = sitesList.getSites();
+            if (sites == null || sites.isEmpty()) {
+                throw new RuntimeException("Список сайтов в конфиге пуст");
+            }
+            
+            String normalizedUrl = normalizeUrl(url);
+            Site siteConfig = sites.stream()
+                    .filter(s -> normalizedUrl.startsWith(normalizeUrl(s.getUrl())))
                     .findFirst()
                     .orElseThrow(() -> new RuntimeException("Сайт не найден в конфиге: " + url));
-            crawlAndIndex(url, siteEntity);
+            
+            // Находим или создаем SiteEntity в БД
+            SiteEntity siteEntity = getOrCreateSiteEntity(siteConfig);
+            siteEntity = saveSiteEntityWithRetry(siteEntity, siteConfig.getUrl());
+            
+            Set<String> visitedUrls = new HashSet<>();
+            Queue<String> urlQueue = new LinkedList<>();
+            visitedUrls.add(normalizedUrl);
+            urlQueue.offer(normalizedUrl);
+            
+            while (!urlQueue.isEmpty()) {
+                String currentUrl = urlQueue.poll();
+                if (currentUrl == null) continue;
+                crawlAndIndex(currentUrl, siteEntity, visitedUrls, urlQueue);
+            }
+            
             return new SimpleResponse(true, null);
         } catch (RuntimeException ex) {
             log.error("Ошибка при индексации страницы {}: {}", url, ex.getMessage(), ex);
@@ -204,7 +226,7 @@ public class IndexingServiceImpl implements IndexingService {
 
     private void performSiteCrawling(Site siteConfig, SiteEntity siteEntity) {
         try {
-            crawlAndIndex(siteConfig.getUrl(), siteEntity);
+            crawlSite(siteConfig.getUrl(), siteEntity);
             updateSiteStatusAfterCrawling(siteEntity);
         } catch (Exception e) {
             log.error("Ошибка при индексации сайта {}: {}", siteConfig.getUrl(), e.toString(), e);
@@ -235,7 +257,42 @@ public class IndexingServiceImpl implements IndexingService {
     }
 
 
-    private void crawlAndIndex(String url, SiteEntity site) {
+    private void crawlSite(String startUrl, SiteEntity site) {
+        Set<String> visitedUrls = new HashSet<>();
+        Queue<String> urlQueue = new LinkedList<>();
+        String normalizedStartUrl = normalizeUrl(startUrl);
+        urlQueue.offer(normalizedStartUrl);
+        visitedUrls.add(normalizedStartUrl);
+        log.info("=== НАЧАЛО ИНДЕКСАЦИИ САЙТА: {} ===", site.getUrl());
+        log.info("Стартовый URL: {} (нормализованный: {})", startUrl, normalizedStartUrl);
+
+        int processedCount = 0;
+        while (!urlQueue.isEmpty() && running) {
+            String url = urlQueue.poll();
+            if (url == null) {
+                log.warn("Получен null из очереди, пропускаем");
+                continue;
+            }
+
+            processedCount++;
+            log.info(">>> Обработка страницы #{}, URL: {}, в очереди осталось: {}", processedCount, url, urlQueue.size());
+
+            try {
+                crawlAndIndex(url, site, visitedUrls, urlQueue);
+                log.info("<<< Страница #{} обработана, размер очереди: {}", processedCount, urlQueue.size());
+            } catch (Exception e) {
+                log.error("ОШИБКА при обработке URL {}: {}", url, e.getMessage(), e);
+            }
+        }
+        
+        if (!running) {
+            log.warn("Индексация остановлена пользователем. Обработано страниц: {}", processedCount);
+        } else {
+            log.info("=== ИНДЕКСАЦИЯ САЙТА {} ЗАВЕРШЕНА. Обработано страниц: {} ===", site.getUrl(), processedCount);
+        }
+    }
+
+    private void crawlAndIndex(String url, SiteEntity site, Set<String> visitedUrls, Queue<String> urlQueue) {
         if (!running) {
             log.debug("Индексация остановлена — пропускаю: {}", url);
             return;
@@ -249,7 +306,7 @@ public class IndexingServiceImpl implements IndexingService {
             String text = extractText(doc);
             PageEntity page = saveOrUpdatePage(site, path, text);
             indexPageContent(page, site, text);
-            crawlLinks(doc, site);
+            crawlLinks(doc, site, visitedUrls, urlQueue);
         } catch (IOException e) {
             handleCrawlError(site, url, "Ошибка чтения " + url + ": " + e.getMessage(), e);
         } catch (Exception e) {
@@ -258,7 +315,11 @@ public class IndexingServiceImpl implements IndexingService {
     }
 
     private String extractPath(String url, SiteEntity site) {
-        return url.replaceFirst("^" + Pattern.quote(site.getUrl()), "");
+        String normalizedSiteUrl = normalizeUrl(site.getUrl());
+        String normalizedUrl = normalizeUrl(url);
+        String path = normalizedUrl.replaceFirst("^" + Pattern.quote(normalizedSiteUrl), "");
+        // Если path пустой, это корневая страница
+        return path.isEmpty() ? "/" : path;
     }
 
     private Document fetchDocument(String url) throws IOException {
@@ -360,17 +421,69 @@ public class IndexingServiceImpl implements IndexingService {
         indexRepository.save(idx);
     }
 
-    private void crawlLinks(Document doc, SiteEntity site) {
+    private void crawlLinks(Document doc, SiteEntity site, Set<String> visitedUrls, Queue<String> urlQueue) {
         Elements links = doc.select("a[href]");
+        int linksFound = 0;
+        int linksAdded = 0;
+        
+        String siteUrlOriginal = site.getUrl();
+        String siteUrlNormalized = normalizeUrl(siteUrlOriginal);
+        
+        log.info("Поиск ссылок на странице. Базовый URL сайта: {}", siteUrlOriginal);
+        
         for (Element link : links) {
+            if (!running) break;
+            
+            String href = link.attr("href");
+            if (href.isEmpty() || href.startsWith("javascript:") || href.startsWith("mailto:") || href.equals("#")) {
+                continue;
+            }
+            
             String absUrl = link.absUrl("href");
-            if (absUrl.startsWith(site.getUrl()) && running) {
-                String childPath = absUrl.replaceFirst("^" + Pattern.quote(site.getUrl()), "");
-                if (!pageRepository.existsBySiteAndPath(site, childPath)) {
-                    crawlAndIndex(absUrl, site);
-                }
+            if (absUrl.isEmpty() || absUrl.equals("#")) {
+                continue;
+            }
+            
+            linksFound++;
+            
+            String normalizedUrl = normalizeUrl(absUrl);
+            
+            if (!normalizedUrl.startsWith(siteUrlNormalized)) {
+                log.debug("Пропущена внешняя ссылка: {} (базовый URL: {})", normalizedUrl, siteUrlNormalized);
+                continue;
+            }
+            
+            if (!visitedUrls.contains(normalizedUrl)) {
+                visitedUrls.add(normalizedUrl);
+                urlQueue.offer(normalizedUrl);
+                linksAdded++;
+                log.info("✓ Добавлен в очередь: {} (всего найдено: {}, добавлено: {})", normalizedUrl, linksFound, linksAdded);
+            } else {
+                log.debug("Пропущен уже посещенный URL: {}", normalizedUrl);
             }
         }
+        log.info("Итого на странице: найдено ссылок {}, добавлено новых {}, размер очереди: {}", 
+                 linksFound, linksAdded, urlQueue.size());
+    }
+
+    private String normalizeUrl(String url) {
+        if (url == null || url.isEmpty()) {
+            return url;
+        }
+        
+        int anchorIndex = url.indexOf('#');
+        if (anchorIndex != -1) {
+            url = url.substring(0, anchorIndex);
+        }
+        
+        url = url.replaceFirst("^https://www\\.", "https://");
+        url = url.replaceFirst("^http://www\\.", "http://");
+        
+        if (url.endsWith("/") && url.length() > 1) {
+            url = url.substring(0, url.length() - 1);
+        }
+        
+        return url;
     }
 
     private void handleCrawlError(SiteEntity site, String url, String errorMessage, Exception e) {
