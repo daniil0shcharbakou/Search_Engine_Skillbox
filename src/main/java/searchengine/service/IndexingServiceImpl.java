@@ -1,9 +1,7 @@
 package searchengine.service;
 
 import lombok.RequiredArgsConstructor;
-import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,14 +10,11 @@ import org.springframework.stereotype.Service;
 import searchengine.config.Site;
 import searchengine.config.SitesList;
 import searchengine.dto.SimpleResponse;
-import searchengine.model.IndexEntity;
-import searchengine.model.LemmaEntity;
 import searchengine.model.PageEntity;
 import searchengine.model.SiteEntity;
-import searchengine.repository.IndexRepository;
-import searchengine.repository.LemmaRepository;
-import searchengine.repository.PageRepository;
 import searchengine.repository.SiteRepository;
+import searchengine.utils.PageIndexingUtils;
+import searchengine.utils.UrlUtils;
 
 import javax.transaction.Transactional;
 import java.io.IOException;
@@ -28,7 +23,6 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
@@ -38,10 +32,7 @@ public class IndexingServiceImpl implements IndexingService {
 
     private final SitesList sitesList;
     private final SiteRepository siteRepository;
-    private final PageRepository pageRepository;
-    private final LemmaRepository lemmaRepository;
-    private final IndexRepository indexRepository;
-    private final MorphologyService morphologyService;
+    private final PageIndexingUtils pageIndexingUtils;
 
     private volatile boolean running = false;
     private ExecutorService executor;
@@ -144,33 +135,13 @@ public class IndexingServiceImpl implements IndexingService {
     @Override
     public SimpleResponse indexPage(String url) {
         try {
-            // Проверяем наличие сайта в конфигурации
+            Site siteConfig = findSiteConfig(url);
+            String name = UrlUtils.extractSiteName(url);
+            sitesList.addSiteIfNotExists(url, name);
             List<Site> sites = sitesList.getSites();
-            if (sites == null || sites.isEmpty()) {
-                throw new RuntimeException("Список сайтов в конфиге пуст");
-            }
-            
-            String normalizedUrl = normalizeUrl(url);
-            Site siteConfig = sites.stream()
-                    .filter(s -> normalizedUrl.startsWith(normalizeUrl(s.getUrl())))
-                    .findFirst()
-                    .orElseThrow(() -> new RuntimeException("Сайт не найден в конфиге: " + url));
-            
-            // Находим или создаем SiteEntity в БД
             SiteEntity siteEntity = getOrCreateSiteEntity(siteConfig);
             siteEntity = saveSiteEntityWithRetry(siteEntity, siteConfig.getUrl());
-            
-            Set<String> visitedUrls = new HashSet<>();
-            Queue<String> urlQueue = new LinkedList<>();
-            visitedUrls.add(normalizedUrl);
-            urlQueue.offer(normalizedUrl);
-            
-            while (!urlQueue.isEmpty()) {
-                String currentUrl = urlQueue.poll();
-                if (currentUrl == null) continue;
-                crawlAndIndex(currentUrl, siteEntity, visitedUrls, urlQueue);
-            }
-            
+            processPageIndexing(url, siteEntity);
             return new SimpleResponse(true, null);
         } catch (RuntimeException ex) {
             log.error("Ошибка при индексации страницы {}: {}", url, ex.getMessage(), ex);
@@ -180,6 +151,41 @@ public class IndexingServiceImpl implements IndexingService {
             return new SimpleResponse(false, "Internal error: " + ex.getMessage());
         }
     }
+
+    private Site findSiteConfig(String url) {
+        List<Site> sites = sitesList.getSites();
+        if (sites == null || sites.isEmpty()) {
+            throw new RuntimeException("Список сайтов в конфиге пуст");
+        }
+        String normalizedUrl = UrlUtils.normalizeUrl(url);
+        return sites.stream()
+                .filter(s -> normalizedUrl.startsWith(UrlUtils.normalizeUrl(s.getUrl())))
+                .findFirst()
+                .orElseThrow(() -> new RuntimeException("Сайт не найден в конфиге: " + url));
+    }
+
+    private void prepareSiteConfig(String url, Site siteConfig) {
+        String name = UrlUtils.extractSiteName(url);
+        sitesList.addSiteIfNotExists(url, name);
+        if (siteConfig.getUrl() != url) {
+            siteConfig.setUrl(url);
+        }
+    }
+
+    private void processPageIndexing(String url, SiteEntity siteEntity) {
+        String normalizedUrl = UrlUtils.normalizeUrl(url);
+        Set<String> visitedUrls = new HashSet<>();
+        Queue<String> urlQueue = new LinkedList<>();
+        visitedUrls.add(normalizedUrl);
+        urlQueue.offer(normalizedUrl);
+        
+        while (!urlQueue.isEmpty()) {
+            String currentUrl = urlQueue.poll();
+            if (currentUrl == null) continue;
+            crawlAndIndex(currentUrl, siteEntity, visitedUrls, urlQueue);
+        }
+    }
+
 
     @Transactional
     protected void indexSite(Site siteConfig) {
@@ -260,7 +266,7 @@ public class IndexingServiceImpl implements IndexingService {
     private void crawlSite(String startUrl, SiteEntity site) {
         Set<String> visitedUrls = new HashSet<>();
         Queue<String> urlQueue = new LinkedList<>();
-        String normalizedStartUrl = normalizeUrl(startUrl);
+        String normalizedStartUrl = UrlUtils.normalizeUrl(startUrl);
         urlQueue.offer(normalizedStartUrl);
         visitedUrls.add(normalizedStartUrl);
         log.info("=== НАЧАЛО ИНДЕКСАЦИИ САЙТА: {} ===", site.getUrl());
@@ -298,15 +304,16 @@ public class IndexingServiceImpl implements IndexingService {
             return;
         }
 
-        String path = extractPath(url, site);
+        String path = UrlUtils.extractPath(url, site);
         log.info("Crawling start: {}", url);
 
         try {
-            Document doc = fetchDocument(url);
-            String text = extractText(doc);
-            PageEntity page = saveOrUpdatePage(site, path, text);
-            indexPageContent(page, site, text);
-            crawlLinks(doc, site, visitedUrls, urlQueue);
+            Document doc = pageIndexingUtils.fetchDocument(url);
+            String text = pageIndexingUtils.extractText(doc);
+            PageEntity page = pageIndexingUtils.saveOrUpdatePage(site, path, text);
+            pageIndexingUtils.indexPageContent(page, site, text);
+            Elements links = doc.select("a[href]");
+            UrlUtils.crawlLinks(links, site, visitedUrls, urlQueue, running);
         } catch (IOException e) {
             handleCrawlError(site, url, "Ошибка чтения " + url + ": " + e.getMessage(), e);
         } catch (Exception e) {
@@ -314,177 +321,6 @@ public class IndexingServiceImpl implements IndexingService {
         }
     }
 
-    private String extractPath(String url, SiteEntity site) {
-        String normalizedSiteUrl = normalizeUrl(site.getUrl());
-        String normalizedUrl = normalizeUrl(url);
-        String path = normalizedUrl.replaceFirst("^" + Pattern.quote(normalizedSiteUrl), "");
-        // Если path пустой, это корневая страница
-        return path.isEmpty() ? "/" : path;
-    }
-
-    private Document fetchDocument(String url) throws IOException {
-        return Jsoup.connect(url)
-                .userAgent("Mozilla/5.0 (compatible; SearchEngineBot/1.0)")
-                .timeout(10_000)
-                .get();
-    }
-
-    private String extractText(Document doc) {
-        return doc.body() != null ? doc.body().text() : "";
-    }
-
-    private PageEntity saveOrUpdatePage(SiteEntity site, String path, String text) {
-        Optional<PageEntity> existingOpt = pageRepository.findBySiteAndPath(site, path);
-        
-        if (existingOpt.isPresent()) {
-            return updateExistingPage(existingOpt.get(), text, site, path);
-        } else {
-            return createNewPage(site, path, text);
-        }
-    }
-
-    private PageEntity updateExistingPage(PageEntity page, String text, SiteEntity site, String path) {
-        page.setCode(200);
-        page.setContent(text);
-        page = pageRepository.save(page);
-        log.info("Updated page id={} site={} path={}", page.getId(), site.getUrl(), page.getPath());
-        
-        deleteOldIndices(page);
-        return page;
-    }
-
-    private void deleteOldIndices(PageEntity page) {
-        try {
-            indexRepository.deleteByPage(page);
-            log.debug("Deleted old indices for page id={}", page.getId());
-        } catch (Exception ex) {
-            log.warn("Не удалось удалить старые индексы для page id={}: {}", page.getId(), ex.getMessage());
-        }
-    }
-
-    private PageEntity createNewPage(SiteEntity site, String path, String text) {
-        PageEntity page = new PageEntity();
-        page.setSite(site);
-        page.setPath(path);
-        page.setCode(200);
-        page.setContent(text);
-        page = pageRepository.save(page);
-        log.info("Saved page id={} site={} path={}", page.getId(), site.getUrl(), page.getPath());
-        return page;
-    }
-
-    private void indexPageContent(PageEntity page, SiteEntity site, String text) {
-        List<String> lemmas = morphologyService.lemmatize(text);
-        Map<String, Integer> freq = countLemmaFrequency(lemmas);
-        saveIndices(page, site, freq);
-    }
-
-    private Map<String, Integer> countLemmaFrequency(List<String> lemmas) {
-        Map<String, Integer> freq = new HashMap<>();
-        for (String lemma : lemmas) {
-            if (lemma == null || lemma.isBlank()) continue;
-            freq.merge(lemma, 1, Integer::sum);
-        }
-        return freq;
-    }
-
-    private void saveIndices(PageEntity page, SiteEntity site, Map<String, Integer> freq) {
-        for (var entry : freq.entrySet()) {
-            String lemma = entry.getKey();
-            int count = entry.getValue();
-            
-            LemmaEntity lemmaEntity = getOrCreateLemma(site, lemma);
-            lemmaEntity.setFrequency(lemmaEntity.getFrequency() + count);
-            lemmaEntity = lemmaRepository.save(lemmaEntity);
-            
-            createIndexEntry(page, lemmaEntity, count);
-        }
-    }
-
-    private LemmaEntity getOrCreateLemma(SiteEntity site, String lemma) {
-        return lemmaRepository
-                .findBySiteAndLemma(site, lemma)
-                .orElseGet(() -> {
-                    LemmaEntity e = new LemmaEntity();
-                    e.setSite(site);
-                    e.setLemma(lemma);
-                    e.setFrequency(0);
-                    return e;
-                });
-    }
-
-    private void createIndexEntry(PageEntity page, LemmaEntity lemmaEntity, int rank) {
-        IndexEntity idx = new IndexEntity();
-        idx.setPage(page);
-        idx.setLemma(lemmaEntity);
-        idx.setRank(rank);
-        indexRepository.save(idx);
-    }
-
-    private void crawlLinks(Document doc, SiteEntity site, Set<String> visitedUrls, Queue<String> urlQueue) {
-        Elements links = doc.select("a[href]");
-        int linksFound = 0;
-        int linksAdded = 0;
-        
-        String siteUrlOriginal = site.getUrl();
-        String siteUrlNormalized = normalizeUrl(siteUrlOriginal);
-        
-        log.info("Поиск ссылок на странице. Базовый URL сайта: {}", siteUrlOriginal);
-        
-        for (Element link : links) {
-            if (!running) break;
-            
-            String href = link.attr("href");
-            if (href.isEmpty() || href.startsWith("javascript:") || href.startsWith("mailto:") || href.equals("#")) {
-                continue;
-            }
-            
-            String absUrl = link.absUrl("href");
-            if (absUrl.isEmpty() || absUrl.equals("#")) {
-                continue;
-            }
-            
-            linksFound++;
-            
-            String normalizedUrl = normalizeUrl(absUrl);
-            
-            if (!normalizedUrl.startsWith(siteUrlNormalized)) {
-                log.debug("Пропущена внешняя ссылка: {} (базовый URL: {})", normalizedUrl, siteUrlNormalized);
-                continue;
-            }
-            
-            if (!visitedUrls.contains(normalizedUrl)) {
-                visitedUrls.add(normalizedUrl);
-                urlQueue.offer(normalizedUrl);
-                linksAdded++;
-                log.info("✓ Добавлен в очередь: {} (всего найдено: {}, добавлено: {})", normalizedUrl, linksFound, linksAdded);
-            } else {
-                log.debug("Пропущен уже посещенный URL: {}", normalizedUrl);
-            }
-        }
-        log.info("Итого на странице: найдено ссылок {}, добавлено новых {}, размер очереди: {}", 
-                 linksFound, linksAdded, urlQueue.size());
-    }
-
-    private String normalizeUrl(String url) {
-        if (url == null || url.isEmpty()) {
-            return url;
-        }
-        
-        int anchorIndex = url.indexOf('#');
-        if (anchorIndex != -1) {
-            url = url.substring(0, anchorIndex);
-        }
-        
-        url = url.replaceFirst("^https://www\\.", "https://");
-        url = url.replaceFirst("^http://www\\.", "http://");
-        
-        if (url.endsWith("/") && url.length() > 1) {
-            url = url.substring(0, url.length() - 1);
-        }
-        
-        return url;
-    }
 
     private void handleCrawlError(SiteEntity site, String url, String errorMessage, Exception e) {
         if (e instanceof IOException) {
