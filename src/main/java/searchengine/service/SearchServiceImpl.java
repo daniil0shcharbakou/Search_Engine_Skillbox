@@ -60,7 +60,7 @@ public class SearchServiceImpl implements SearchService {
 
             items.forEach(item -> {
                 if (item != null) {
-                    item.setUri("");
+                    item.setSite("");
                 }
             });
 
@@ -213,26 +213,20 @@ public class SearchServiceImpl implements SearchService {
 
         String trimmed = path.trim();
 
-        // Если path уже содержит полный URL
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-            // Нормализуем siteUrl для сравнения (убираем завершающий слэш)
             String normalizedSiteUrl = siteUrl.endsWith("/") ? siteUrl.substring(0, siteUrl.length() - 1) : siteUrl;
             String normalizedPath = trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
-            
-            // Проверяем, не содержит ли path уже siteUrl (чтобы избежать дублирования)
+
             if (normalizedPath.startsWith(normalizedSiteUrl)) {
                 return trimmed;
             }
-            // Если это другой домен, возвращаем как есть
             return trimmed;
         }
 
-        // Если path пустой, возвращаем siteUrl с завершающим слэшем
         if (trimmed.isEmpty()) {
             return siteUrl.endsWith("/") ? siteUrl : siteUrl + "/";
         }
 
-        // Нормализуем слэши
         if (!siteUrl.endsWith("/") && !trimmed.startsWith("/")) {
             return siteUrl + "/" + trimmed;
         } else if (siteUrl.endsWith("/") && trimmed.startsWith("/")) {
