@@ -49,5 +49,8 @@ public interface IndexRepository extends JpaRepository<IndexEntity, Integer> {
     @Query("SELECT COUNT(DISTINCT i.page.id) FROM IndexEntity i WHERE i.page.site.url = :siteUrl")
     long countDistinctPagesBySite(@Param("siteUrl") String siteUrl);
 
+    @Query("SELECT i FROM IndexEntity i WHERE i.page = :page")
+    List<IndexEntity> findByPage(@Param("page") PageEntity page);
+
     void deleteByPage(PageEntity page);
 }

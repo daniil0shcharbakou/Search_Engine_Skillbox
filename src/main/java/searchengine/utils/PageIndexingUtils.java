@@ -43,6 +43,33 @@ public class PageIndexingUtils {
         return doc.body() != null ? doc.body().text() : "";
     }
 
+    public void deletePageIfExists(SiteEntity site, String path) {
+        Optional<PageEntity> existingOpt = pageRepository.findBySiteAndPath(site, path);
+        if (existingOpt.isPresent()) {
+            PageEntity page = existingOpt.get();
+            decreaseLemmaFrequencies(page);
+            deleteOldIndices(page);
+            pageRepository.delete(page);
+            log.info("Удалена существующая страница: site={}, path={}", site.getUrl(), path);
+        }
+    }
+
+    private void decreaseLemmaFrequencies(PageEntity page) {
+        try {
+            List<IndexEntity> indices = indexRepository.findByPage(page);
+            
+            for (IndexEntity idx : indices) {
+                LemmaEntity lemma = idx.getLemma();
+                int rank = (int) idx.getRank();
+                lemma.setFrequency(Math.max(0, lemma.getFrequency() - rank));
+                lemmaRepository.save(lemma);
+            }
+            log.debug("Уменьшены частоты лемм для страницы id={}", page.getId());
+        } catch (Exception ex) {
+            log.warn("Не удалось уменьшить частоты лемм для страницы id={}: {}", page.getId(), ex.getMessage());
+        }
+    }
+
     public PageEntity saveOrUpdatePage(SiteEntity site, String path, String text) {
         Optional<PageEntity> existingOpt = pageRepository.findBySiteAndPath(site, path);
         

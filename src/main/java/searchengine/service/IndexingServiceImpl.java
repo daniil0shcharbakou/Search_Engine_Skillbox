@@ -12,6 +12,7 @@ import searchengine.config.SitesList;
 import searchengine.dto.SimpleResponse;
 import searchengine.model.PageEntity;
 import searchengine.model.SiteEntity;
+import searchengine.repository.PageRepository;
 import searchengine.repository.SiteRepository;
 import searchengine.utils.PageIndexingUtils;
 import searchengine.utils.UrlUtils;
@@ -32,6 +33,7 @@ public class IndexingServiceImpl implements IndexingService {
 
     private final SitesList sitesList;
     private final SiteRepository siteRepository;
+    private final PageRepository pageRepository;
     private final PageIndexingUtils pageIndexingUtils;
 
     private volatile boolean running = false;
@@ -133,15 +135,21 @@ public class IndexingServiceImpl implements IndexingService {
     }
 
     @Override
+    @Transactional
     public SimpleResponse indexPage(String url) {
         try {
             Site siteConfig = findSiteConfig(url);
-            String name = UrlUtils.extractSiteName(url);
-            sitesList.addSiteIfNotExists(url, name);
-            List<Site> sites = sitesList.getSites();
-            SiteEntity siteEntity = getOrCreateSiteEntity(siteConfig);
-            siteEntity = saveSiteEntityWithRetry(siteEntity, siteConfig.getUrl());
-            processPageIndexing(url, siteEntity);
+            SiteEntity siteEntity = findExistingSiteEntity(url, siteConfig);
+            if (siteEntity == null) {
+                return new SimpleResponse(false, "Сайт не найден в базе данных");
+            }
+            
+            String path = UrlUtils.extractPath(url, siteEntity);
+
+            pageIndexingUtils.deletePageIfExists(siteEntity, path);
+
+            indexSinglePage(url, siteEntity);
+            
             return new SimpleResponse(true, null);
         } catch (RuntimeException ex) {
             log.error("Ошибка при индексации страницы {}: {}", url, ex.getMessage(), ex);
@@ -172,18 +180,31 @@ public class IndexingServiceImpl implements IndexingService {
         }
     }
 
-    private void processPageIndexing(String url, SiteEntity siteEntity) {
-        String normalizedUrl = UrlUtils.normalizeUrl(url);
-        Set<String> visitedUrls = new HashSet<>();
-        Queue<String> urlQueue = new LinkedList<>();
-        visitedUrls.add(normalizedUrl);
-        urlQueue.offer(normalizedUrl);
+    private SiteEntity findExistingSiteEntity(String pageUrl, Site siteConfig) {
+        String normalizedPageUrl = UrlUtils.normalizeUrl(pageUrl);
+        String normalizedSiteUrl = UrlUtils.normalizeUrl(siteConfig.getUrl());
+
+        List<SiteEntity> allSites = siteRepository.findAll();
+        return allSites.stream()
+                .filter(site -> {
+                    String siteUrl = UrlUtils.normalizeUrl(site.getUrl());
+                    return normalizedPageUrl.startsWith(siteUrl);
+                })
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void indexSinglePage(String url, SiteEntity siteEntity) throws IOException {
+        String path = UrlUtils.extractPath(url, siteEntity);
+        log.info("Индексация одной страницы: {} (путь: {})", url, path);
         
-        while (!urlQueue.isEmpty()) {
-            String currentUrl = urlQueue.poll();
-            if (currentUrl == null) continue;
-            crawlAndIndex(currentUrl, siteEntity, visitedUrls, urlQueue);
-        }
+        Document doc = pageIndexingUtils.fetchDocument(url);
+        String text = pageIndexingUtils.extractText(doc);
+        PageEntity page = pageIndexingUtils.saveOrUpdatePage(siteEntity, path, text);
+        pageIndexingUtils.indexPageContent(page, siteEntity, text);
+
+        Elements links = doc.select("a[href]");
+        log.info("На странице найдено {} ссылок (не индексируются)", links.size());
     }
 
 
